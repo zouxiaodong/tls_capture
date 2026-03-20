@@ -58,6 +58,10 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Error: invalid buffer size: %s\n", optarg);
                 return 1;
             }
+            if (ringbuf_mb & (ringbuf_mb - 1)) {
+                fprintf(stderr, "Error: buffer size must be a power of 2 (1, 2, 4, 8, ...)\n");
+                return 1;
+            }
             break;
         case 'v':
             verbose = 1;

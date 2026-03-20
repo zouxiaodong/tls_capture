@@ -68,7 +68,8 @@ nginx -c "$NGINX_CONF"
 NGINX_PID=$(cat "$TMPDIR/nginx.pid")
 echo "nginx started (PID: $NGINX_PID) on port 18443"
 
-$TLSCAP -p "$NGINX_PID" > "$CAPTURE_FILE" 2>/dev/null &
+# Don't use -p filtering: nginx master PID != worker PID where SSL ops happen
+$TLSCAP > "$CAPTURE_FILE" 2>/dev/null &
 TLSCAP_PID=$!
 sleep 1
 
