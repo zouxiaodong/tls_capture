@@ -5,8 +5,10 @@
 #include <signal.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+#include <gelf.h>
 #include "tlscap.skel.h"
 #include "ssl_detect.h"
 #include "event_reader.h"
@@ -18,6 +20,69 @@ static void sig_handler(int sig)
 {
     (void)sig;
     running = 0;
+}
+
+/* Find symbol offset in ELF file (works for both .so and executable) */
+static long find_symbol_offset(const char *path, const char *symbol)
+{
+    Elf *elf = NULL;
+    int fd = -1;
+    long offset = -1;
+
+    if (elf_version(EV_CURRENT) == EV_NONE) {
+        fprintf(stderr, "ELF library init failed\n");
+        return -1;
+    }
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        perror("open");
+        return -1;
+    }
+
+    elf = elf_begin(fd, ELF_C_READ, NULL);
+    if (!elf) {
+        fprintf(stderr, "elf_begin failed: %s\n", elf_errmsg(-1));
+        goto out;
+    }
+
+    GElf_Ehdr ehdr;
+    if (!gelf_getehdr(elf, &ehdr)) {
+        fprintf(stderr, "gelf_getehdr failed\n");
+        goto out;
+    }
+
+    Elf_Scn *scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        GElf_Shdr shdr;
+        if (!gelf_getshdr(scn, &shdr))
+            continue;
+
+        if (shdr.sh_type != SHT_SYMTAB && shdr.sh_type != SHT_DYNSYM)
+            continue;
+
+        Elf_Data *data = elf_getdata(scn, NULL);
+        if (!data)
+            continue;
+
+        int nsyms = shdr.sh_size / shdr.sh_entsize;
+        for (int i = 0; i < nsyms; i++) {
+            GElf_Sym sym;
+            if (!gelf_getsym(data, i, &sym))
+                continue;
+
+            const char *name = elf_strptr(elf, shdr.sh_link, sym.st_name);
+            if (name && strcmp(name, symbol) == 0) {
+                offset = sym.st_value;
+                goto out;
+            }
+        }
+    }
+
+out:
+    if (elf) elf_end(elf);
+    if (fd >= 0) close(fd);
+    return offset;
 }
 
 static void usage(const char *prog)
@@ -122,45 +187,62 @@ int main(int argc, char **argv)
         bpf_map_update_elem(fd, &key, &val, BPF_ANY);
     }
 
-    /* Attach uprobes to libssl.so */
+    /* Attach uprobes to libssl.so or executable with static OpenSSL */
     int attach_pid = target_pid_val > 0 ? target_pid_val : -1;
+
+    /* Find symbol offsets (works for both .so and static executable) */
+    long ssl_write_offset = find_symbol_offset(libssl_path, "SSL_write");
+    long ssl_read_offset = find_symbol_offset(libssl_path, "SSL_read");
+
+    if (ssl_write_offset < 0) {
+        fprintf(stderr, "Error: cannot find SSL_write symbol in %s\n", libssl_path);
+        goto cleanup;
+    }
+    if (ssl_read_offset < 0) {
+        fprintf(stderr, "Error: cannot find SSL_read symbol in %s\n", libssl_path);
+        goto cleanup;
+    }
+    if (verbose) {
+        fprintf(stderr, "SSL_write offset: 0x%lx\n", ssl_write_offset);
+        fprintf(stderr, "SSL_read offset: 0x%lx\n", ssl_read_offset);
+    }
 
     LIBBPF_OPTS(bpf_uprobe_opts, opts);
 
-    opts.func_name = "SSL_write";
     opts.retprobe = false;
     skel->links.ssl_write_entry = bpf_program__attach_uprobe_opts(
-        skel->progs.ssl_write_entry, attach_pid, libssl_path, 0, &opts);
+        skel->progs.ssl_write_entry, attach_pid, libssl_path,
+        ssl_write_offset, &opts);
     if (!skel->links.ssl_write_entry) {
-        fprintf(stderr, "Error: failed to attach uprobe to SSL_write: %s\n"
-                "Hint: SSL_write symbol may be stripped, or OpenSSL may be "
-                "statically linked.\n", strerror(errno));
+        fprintf(stderr, "Error: failed to attach uprobe to SSL_write: %s\n",
+                strerror(errno));
         goto cleanup;
     }
 
     opts.retprobe = true;
     skel->links.ssl_write_return = bpf_program__attach_uprobe_opts(
-        skel->progs.ssl_write_return, attach_pid, libssl_path, 0, &opts);
+        skel->progs.ssl_write_return, attach_pid, libssl_path,
+        ssl_write_offset, &opts);
     if (!skel->links.ssl_write_return) {
         fprintf(stderr, "Error: failed to attach uretprobe to SSL_write: %s\n",
                 strerror(errno));
         goto cleanup;
     }
 
-    opts.func_name = "SSL_read";
     opts.retprobe = false;
     skel->links.ssl_read_entry = bpf_program__attach_uprobe_opts(
-        skel->progs.ssl_read_entry, attach_pid, libssl_path, 0, &opts);
+        skel->progs.ssl_read_entry, attach_pid, libssl_path,
+        ssl_read_offset, &opts);
     if (!skel->links.ssl_read_entry) {
-        fprintf(stderr, "Error: failed to attach uprobe to SSL_read: %s\n"
-                "Hint: SSL_read symbol may be stripped, or OpenSSL may be "
-                "statically linked.\n", strerror(errno));
+        fprintf(stderr, "Error: failed to attach uprobe to SSL_read: %s\n",
+                strerror(errno));
         goto cleanup;
     }
 
     opts.retprobe = true;
     skel->links.ssl_read_return = bpf_program__attach_uprobe_opts(
-        skel->progs.ssl_read_return, attach_pid, libssl_path, 0, &opts);
+        skel->progs.ssl_read_return, attach_pid, libssl_path,
+        ssl_read_offset, &opts);
     if (!skel->links.ssl_read_return) {
         fprintf(stderr, "Error: failed to attach uretprobe to SSL_read: %s\n",
                 strerror(errno));

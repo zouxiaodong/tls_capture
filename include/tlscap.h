@@ -2,7 +2,7 @@
 #ifndef TLSCAP_H
 #define TLSCAP_H
 
-#ifndef __KERNEL__
+#ifndef __BPF_PROGRAM__
 #include <linux/types.h>
 #endif
 

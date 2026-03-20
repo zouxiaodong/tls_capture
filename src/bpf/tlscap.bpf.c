@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // src/bpf/tlscap.bpf.c - eBPF probes for SSL_read/SSL_write
 
-#include <linux/bpf.h>
+#include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include "tlscap.h"
@@ -51,8 +51,19 @@ static __always_inline int check_target_pid(void)
 }
 
 static __always_inline int process_ssl_return(
-    void *map, __u32 evt_type, int ret)
+    void *map, __u32 evt_type, int ret_val)
 {
+    if (ret_val <= 0)
+        return 0;
+
+    /* Save ret_val early and bound it for the verifier.
+     * The key insight: ret_val comes from PT_REGS_RC which may be signed,
+     * but we've already checked ret_val > 0. We need to explicitly bound it
+     * using bitwise AND so verifier knows the value is non-negative.
+     */
+    __u32 len = ret_val & (MAX_DATA_SIZE - 1);
+    __u32 orig_len = ret_val;
+
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     struct ssl_args *args = bpf_map_lookup_elem(map, &pid_tgid);
     if (!args)
@@ -60,9 +71,6 @@ static __always_inline int process_ssl_return(
 
     struct ssl_args saved = *args;
     bpf_map_delete_elem(map, &pid_tgid);
-
-    if (ret <= 0)
-        return 0;
 
     struct tls_event *evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
     if (!evt)
@@ -76,20 +84,19 @@ static __always_inline int process_ssl_return(
     evt->truncated = 0;
     bpf_get_current_comm(evt->comm, sizeof(evt->comm));
 
-    __u32 len = (__u32)ret;
-    evt->data_len = len;
-    if (len >= MAX_DATA_SIZE) {
-        len = MAX_DATA_SIZE - 1;
+    /* Record original length for data_len */
+    evt->data_len = orig_len;
+    if (orig_len >= MAX_DATA_SIZE) {
         evt->truncated = 1;
     }
 
-    int read_ret = bpf_probe_read_user(evt->data,
-                        len & (MAX_DATA_SIZE - 1),
-                        (void *)saved.buf);
-    if (read_ret != 0)
+    /* len is already bounded by the bitwise AND above */
+    barrier_var(len);
+
+    if (bpf_probe_read_user(evt->data, len, (void *)saved.buf) != 0)
         evt->data_len = 0;
 
-    evt->data[len & (MAX_DATA_SIZE - 1)] = '\0';
+    evt->data[len] = '\0';
 
     bpf_ringbuf_submit(evt, 0);
     return 0;
@@ -98,10 +105,13 @@ static __always_inline int process_ssl_return(
 /* --- SSL_write probes --- */
 
 SEC("uprobe")
-int BPF_UPROBE(ssl_write_entry, void *ssl, const void *buf, int num)
+int ssl_write_entry(struct pt_regs *ctx)
 {
     if (!check_target_pid())
         return 0;
+
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    const void *buf = (const void *)PT_REGS_PARM2(ctx);
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     struct ssl_args args = {
@@ -113,20 +123,24 @@ int BPF_UPROBE(ssl_write_entry, void *ssl, const void *buf, int num)
 }
 
 SEC("uretprobe")
-int BPF_URETPROBE(ssl_write_return, int ret)
+int ssl_write_return(struct pt_regs *ctx)
 {
     if (!check_target_pid())
         return 0;
+    int ret = (int)PT_REGS_RC(ctx);
     return process_ssl_return(&ssl_write_args, EVENT_SSL_WRITE, ret);
 }
 
 /* --- SSL_read probes --- */
 
 SEC("uprobe")
-int BPF_UPROBE(ssl_read_entry, void *ssl, void *buf, int num)
+int ssl_read_entry(struct pt_regs *ctx)
 {
     if (!check_target_pid())
         return 0;
+
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    void *buf = (void *)PT_REGS_PARM2(ctx);
 
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     struct ssl_args args = {
@@ -138,9 +152,10 @@ int BPF_UPROBE(ssl_read_entry, void *ssl, void *buf, int num)
 }
 
 SEC("uretprobe")
-int BPF_URETPROBE(ssl_read_return, int ret)
+int ssl_read_return(struct pt_regs *ctx)
 {
     if (!check_target_pid())
         return 0;
+    int ret = (int)PT_REGS_RC(ctx);
     return process_ssl_return(&ssl_read_args, EVENT_SSL_READ, ret);
 }

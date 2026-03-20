@@ -67,8 +67,8 @@ static void print_hex_dump(const char *data, uint32_t len)
 void output_event(const struct tls_event *evt)
 {
     const char *dir = (evt->type == EVENT_SSL_READ)
-                      ? "READ (请求)"
-                      : "WRITE (响应)";
+                      ? "READ (响应)"
+                      : "WRITE (请求)";
 
     char ts[32];
     output_format_timestamp(evt->timestamp_ns, ts, sizeof(ts));

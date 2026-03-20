@@ -7,7 +7,7 @@ BPFTOOL ?= bpftool
 ARCH := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 
 # BPF compilation flags
-BPF_CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -I include
+BPF_CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -D__BPF_PROGRAM__ -I include
 
 # User-space compilation flags
 CFLAGS  := -g -O2 -Wall -Wextra -I include -I src
