@@ -249,6 +249,54 @@ int main(int argc, char **argv)
         goto cleanup;
     }
 
+    /* Try to attach SSL_write_ex and SSL_read_ex (optional, may not exist) */
+    long ssl_write_ex_offset = find_symbol_offset(libssl_path, "SSL_write_ex");
+    long ssl_read_ex_offset = find_symbol_offset(libssl_path, "SSL_read_ex");
+
+    if (ssl_write_ex_offset >= 0) {
+        if (verbose)
+            fprintf(stderr, "SSL_write_ex offset: 0x%lx\n", ssl_write_ex_offset);
+        opts.retprobe = false;
+        skel->links.ssl_write_ex_entry = bpf_program__attach_uprobe_opts(
+            skel->progs.ssl_write_ex_entry, attach_pid, libssl_path,
+            ssl_write_ex_offset, &opts);
+        if (!skel->links.ssl_write_ex_entry) {
+            fprintf(stderr, "Warning: failed to attach uprobe to SSL_write_ex: %s\n",
+                    strerror(errno));
+        } else {
+            opts.retprobe = true;
+            skel->links.ssl_write_ex_return = bpf_program__attach_uprobe_opts(
+                skel->progs.ssl_write_ex_return, attach_pid, libssl_path,
+                ssl_write_ex_offset, &opts);
+            if (!skel->links.ssl_write_ex_return) {
+                fprintf(stderr, "Warning: failed to attach uretprobe to SSL_write_ex: %s\n",
+                        strerror(errno));
+            }
+        }
+    }
+
+    if (ssl_read_ex_offset >= 0) {
+        if (verbose)
+            fprintf(stderr, "SSL_read_ex offset: 0x%lx\n", ssl_read_ex_offset);
+        opts.retprobe = false;
+        skel->links.ssl_read_ex_entry = bpf_program__attach_uprobe_opts(
+            skel->progs.ssl_read_ex_entry, attach_pid, libssl_path,
+            ssl_read_ex_offset, &opts);
+        if (!skel->links.ssl_read_ex_entry) {
+            fprintf(stderr, "Warning: failed to attach uprobe to SSL_read_ex: %s\n",
+                    strerror(errno));
+        } else {
+            opts.retprobe = true;
+            skel->links.ssl_read_ex_return = bpf_program__attach_uprobe_opts(
+                skel->progs.ssl_read_ex_return, attach_pid, libssl_path,
+                ssl_read_ex_offset, &opts);
+            if (!skel->links.ssl_read_ex_return) {
+                fprintf(stderr, "Warning: failed to attach uretprobe to SSL_read_ex: %s\n",
+                        strerror(errno));
+            }
+        }
+    }
+
     /* Setup output and event reader */
     output_init();
     struct ring_buffer *rb = event_reader_create(

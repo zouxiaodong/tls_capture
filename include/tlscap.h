@@ -31,6 +31,7 @@ struct tls_event {
 struct ssl_args {
     __u64 buf;
     __u64 ssl_ptr;
+    __u64 bytes_ptr;  /* For SSL_read_ex/SSL_write_ex: pointer to size_t output */
 };
 
 #endif /* TLSCAP_H */
