@@ -2,6 +2,10 @@
 #ifndef TLSCAP_H
 #define TLSCAP_H
 
+#ifndef __KERNEL__
+#include <linux/types.h>
+#endif
+
 #define MAX_DATA_SIZE  16384
 #define MAX_COMM_SIZE  16
 
