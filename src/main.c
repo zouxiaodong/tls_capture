@@ -22,12 +22,20 @@ static void sig_handler(int sig)
     running = 0;
 }
 
-/* Find symbol offset in ELF file (works for both .so and executable) */
+/* Find symbol offset in ELF file.
+ * For shared libraries: st_value is the file offset (works as-is).
+ * For PIE executables: st_value is VMA, need to convert to file offset.
+ * 
+ * Note: LOAD segments are program headers (PT_LOAD), not section headers.
+ */
 static long find_symbol_offset(const char *path, const char *symbol)
 {
     Elf *elf = NULL;
     int fd = -1;
     long offset = -1;
+    unsigned long base_vaddr = 0;
+    unsigned long base_offset = 0;
+    int is_pie = 0;
 
     if (elf_version(EV_CURRENT) == EV_NONE) {
         fprintf(stderr, "ELF library init failed\n");
@@ -52,6 +60,31 @@ static long find_symbol_offset(const char *path, const char *symbol)
         goto out;
     }
 
+    /* 
+     * For both PIE (ET_DYN) and static executables (ET_EXEC), the symbol
+     * addresses are virtual addresses, not file offsets. We need to
+     * convert them to file offsets using the first LOAD segment.
+     * Only for shared libraries (ET_DYN with entry=0) is st_value a file offset.
+     */
+    is_pie = (ehdr.e_type == ET_DYN && ehdr.e_entry != 0) || (ehdr.e_type == ET_EXEC);
+
+    /* For PIE or static exec, find the first PT_LOAD segment to get base addresses */
+    if (is_pie) {
+        size_t phdr_num = ehdr.e_phnum;
+        for (size_t i = 0; i < phdr_num; i++) {
+            GElf_Phdr phdr;
+            if (!gelf_getphdr(elf, i, &phdr))
+                continue;
+            /* PT_LOAD = 1 */
+            if (phdr.p_type == 1 && base_vaddr == 0) {
+                base_vaddr = phdr.p_vaddr;
+                base_offset = phdr.p_offset;
+                break;
+            }
+        }
+    }
+
+    /* Find the symbol in symtab or dynsym */
     Elf_Scn *scn = NULL;
     while ((scn = elf_nextscn(elf, scn)) != NULL) {
         GElf_Shdr shdr;
@@ -73,7 +106,15 @@ static long find_symbol_offset(const char *path, const char *symbol)
 
             const char *name = elf_strptr(elf, shdr.sh_link, sym.st_name);
             if (name && strcmp(name, symbol) == 0) {
-                offset = sym.st_value;
+                unsigned long sym_vaddr = sym.st_value;
+                
+                if (is_pie && base_vaddr != 0) {
+                    /* Convert VMA to file offset for PIE */
+                    offset = (long)(sym_vaddr - base_vaddr + base_offset);
+                } else {
+                    /* For shared libraries, st_value is already the file offset */
+                    offset = (long)sym_vaddr;
+                }
                 goto out;
             }
         }
@@ -210,14 +251,19 @@ int main(int argc, char **argv)
     LIBBPF_OPTS(bpf_uprobe_opts, opts);
 
     opts.retprobe = false;
+    if (verbose)
+        fprintf(stderr, "Attaching uprobe to SSL_write at offset 0x%lx (pid=%d)...\n",
+                ssl_write_offset, attach_pid);
     skel->links.ssl_write_entry = bpf_program__attach_uprobe_opts(
         skel->progs.ssl_write_entry, attach_pid, libssl_path,
         ssl_write_offset, &opts);
     if (!skel->links.ssl_write_entry) {
-        fprintf(stderr, "Error: failed to attach uprobe to SSL_write: %s\n",
-                strerror(errno));
+        fprintf(stderr, "Error: failed to attach uprobe to SSL_write: %s (errno=%d)\n",
+                strerror(errno), errno);
         goto cleanup;
     }
+    if (verbose)
+        fprintf(stderr, "Successfully attached uprobe to SSL_write\n");
 
     opts.retprobe = true;
     skel->links.ssl_write_return = bpf_program__attach_uprobe_opts(

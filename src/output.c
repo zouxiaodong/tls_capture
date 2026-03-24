@@ -79,15 +79,21 @@ void output_event(const struct tls_event *evt)
     if (evt->truncated)
         printf(" [TRUNCATED]");
     printf("\n");
+    fflush(stdout);
 
     uint32_t print_len = evt->data_len;
     if (print_len >= MAX_DATA_SIZE)
         print_len = MAX_DATA_SIZE - 1;
 
     if (print_len == 0) {
+        fprintf(stderr, "[DEBUG] Event received with 0 data length\n");
         printf("  (empty)\n\n");
+        fflush(stdout);
         return;
     }
+
+    fprintf(stderr, "[DEBUG] Event received: type=%d data_len=%u\n",
+            evt->type, evt->data_len);
 
     if (output_is_printable(evt->data, print_len)) {
         fwrite(evt->data, 1, print_len, stdout);
@@ -96,4 +102,5 @@ void output_event(const struct tls_event *evt)
         print_hex_dump(evt->data, print_len);
         printf("\n");
     }
+    fflush(stdout);
 }

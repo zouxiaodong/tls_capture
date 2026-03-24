@@ -33,7 +33,37 @@ sudo ./tlscap -l /usr/lib64/libssl.so.1.1
 
 # Adjust ring buffer size (MB)
 sudo ./tlscap -b 8
+# Adjust ring buffer size (MB)
+sudo ./tlscap -b 8
 ```
+
+## Important Notes
+
+### Statically Linked Executables
+
+tlscap supports **both** dynamically linked and **statically linked** OpenSSL binaries:
+
+- **Dynamic linking** (e.g., `ldd nginx | grep ssl`): Uses system libssl.so
+- **Static linking** (no libssl.so dependency): Specify the executable path directly
+
+```bash
+# For statically linked nginx (no libssl.so dependency)
+sudo ./tlscap -l /path/to/nginx
+
+# Verify nginx has static SSL symbols
+nm /path/to/nginx | grep SSL_
+```
+
+### Troubleshooting
+
+**No output despite traffic?**
+- Use `-v` flag to see verbose output and verify probes attached correctly
+- Check that nginx is actually using SSL/TLS (`ldd nginx` shows no ssl = static linking)
+- Make sure you're specifying the correct nginx binary path with `-l`
+
+**eBPF probe attachment failed?**
+- Verify kernel version >= 5.10: `uname -r`
+- Check BTF support: `bpftool btf dump id 1 > /dev/null && echo "BTF OK"`
 
 ## Testing
 

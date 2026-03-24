@@ -9,11 +9,14 @@ static unsigned long events_lost = 0;
 static int event_handler(void *ctx, void *data, size_t data_sz)
 {
     (void)ctx;
+    fprintf(stderr, "[DEBUG] event_handler called with data_sz=%zu\n", data_sz);
     if (data_sz < sizeof(struct tls_event)) {
+        fprintf(stderr, "[DEBUG] Event too small: %zu < %zu\n", data_sz, sizeof(struct tls_event));
         events_lost++;
         return 0;
     }
     const struct tls_event *evt = data;
+    fprintf(stderr, "[DEBUG] Processing event: type=%d, data_len=%u\n", evt->type, evt->data_len);
     output_event(evt);
     return 0;
 }
