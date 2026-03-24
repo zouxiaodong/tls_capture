@@ -11,10 +11,10 @@ BPF_CFLAGS := -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) -D__BPF_PROGRAM__ -I in
 
 # User-space compilation flags
 CFLAGS  := -g -O2 -Wall -Wextra -I include -I src
-LDFLAGS := -lbpf -lelf -lz
+LDFLAGS := -lbpf -lelf -lz -lpcap
 
 # Source files
-USER_SRCS := src/main.c src/ssl_detect.c src/output.c src/event_reader.c src/pcap_writer.c
+USER_SRCS := src/main.c src/ssl_detect.c src/output.c src/event_reader.c src/pcap_writer.c src/keylog_writer.c
 USER_OBJS := $(USER_SRCS:.c=.o)
 
 # Targets
@@ -35,7 +35,7 @@ $(BPF_SKEL): $(BPF_OBJ)
 	$(BPFTOOL) gen skeleton $< > $@
 
 # Step 3: Compile user-space objects
-src/main.o: src/main.c $(BPF_SKEL) src/ssl_detect.h src/event_reader.h src/output.h src/pcap_writer.h
+src/main.o: src/main.c $(BPF_SKEL) src/ssl_detect.h src/event_reader.h src/output.h src/pcap_writer.h src/keylog_writer.h
 	$(GCC) $(CFLAGS) -c $< -o $@
 
 src/ssl_detect.o: src/ssl_detect.c src/ssl_detect.h
@@ -47,12 +47,17 @@ src/output.o: src/output.c src/output.h include/tlscap.h src/pcap_writer.h
 src/pcap_writer.o: src/pcap_writer.c src/pcap_writer.h include/tlscap.h
 	$(GCC) $(CFLAGS) -c $< -o $@
 
+src/keylog_writer.o: src/keylog_writer.c src/keylog_writer.h include/tlscap.h
+	$(GCC) $(CFLAGS) -c $< -o $@
+
 src/event_reader.o: src/event_reader.c src/event_reader.h src/output.h include/tlscap.h
 	$(GCC) $(CFLAGS) -c $< -o $@
 
 # Step 4: Link final binary
 $(TARGET): $(USER_OBJS)
 	$(GCC) $^ -o $@ $(LDFLAGS)
+
+$(TARGET): src/keylog_writer.o
 
 # Tests
 tests/test_ssl_detect: tests/test_ssl_detect.c src/ssl_detect.c src/ssl_detect.h

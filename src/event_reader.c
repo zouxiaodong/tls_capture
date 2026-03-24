@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include "event_reader.h"
 #include "output.h"
+#include "keylog_writer.h"
 #include "tlscap.h"
 
 static unsigned long events_lost = 0;
@@ -10,6 +11,18 @@ static int event_handler(void *ctx, void *data, size_t data_sz)
 {
     (void)ctx;
     fprintf(stderr, "[DEBUG] event_handler called with data_sz=%zu\n", data_sz);
+
+    if (data_sz >= sizeof(struct master_secret_event)) {
+        const struct master_secret_event *ms_evt = data;
+        if (ms_evt->type == EVENT_MASTER_SECRET) {
+            fprintf(stderr, "[DEBUG] Processing master secret event: pid=%u\n", ms_evt->pid);
+            if (keylog_writer_is_enabled()) {
+                keylog_writer_write(ms_evt);
+            }
+            return 0;
+        }
+    }
+
     if (data_sz < sizeof(struct tls_event)) {
         fprintf(stderr, "[DEBUG] Event too small: %zu < %zu\n", data_sz, sizeof(struct tls_event));
         events_lost++;

@@ -12,6 +12,25 @@
 enum event_type {
     EVENT_SSL_READ  = 0,
     EVENT_SSL_WRITE = 1,
+    EVENT_MASTER_SECRET = 2,  /* TLS master secret / keylog */
+};
+
+/* TLS 1.2: 32 bytes client_random + 48 bytes master_secret = 80 bytes total */
+#define TLS_CLIENT_RANDOM_SIZE 32
+#define TLS_MASTER_SECRET_SIZE  48
+#define TLS_KEYLOG_LINE_SIZE   128  /* CLIENT_RANDOM + master_secret as hex */
+
+struct master_secret_event {
+    __u32 pid;
+    __u32 tid;
+    __u64 timestamp_ns;
+    __u32 type;
+    __u32 version;
+    __u32 cipher_id;
+    __u8  client_random[TLS_CLIENT_RANDOM_SIZE];
+    __u8  master_secret[TLS_MASTER_SECRET_SIZE];
+    __u8  is_client;
+    char  comm[MAX_COMM_SIZE];
 };
 
 struct tls_event {

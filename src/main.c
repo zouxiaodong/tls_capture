@@ -14,6 +14,7 @@
 #include "event_reader.h"
 #include "output.h"
 #include "pcap_writer.h"
+#include "keylog_writer.h"
 
 static volatile sig_atomic_t running = 1;
 
@@ -136,7 +137,8 @@ static void usage(const char *prog)
         "  -l PATH   Path to libssl.so (default: auto-detect)\n"
         "  -b SIZE   Ring buffer size in MB (default: 4)\n"
         "  -w FILE   Write output to PCAP file for Wireshark\n"
-"  -v        Verbose output\n"
+        "  -k FILE   Write TLS keylog file for Wireshark decryption\n"
+        "  -v        Verbose output\n"
         "  -h        Show help\n", prog);
 }
 
@@ -145,11 +147,12 @@ int main(int argc, char **argv)
     int target_pid_val = 0;
     const char *libssl_path_arg = NULL;
     const char *pcap_path = NULL;
+    const char *keylog_path = NULL;
     int ringbuf_mb = 4;
     int verbose = 0;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:l:b:w:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:l:b:w:k:vh")) != -1) {
         switch (opt) {
         case 'p':
             target_pid_val = atoi(optarg);
@@ -177,6 +180,9 @@ int main(int argc, char **argv)
             break;
         case 'w':
             pcap_path = optarg;
+            break;
+        case 'k':
+            keylog_path = optarg;
             break;
         case 'h':
             usage(argv[0]);
@@ -349,6 +355,27 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Try to attach SSL_do_handshake for master secret extraction */
+    long ssl_do_handshake_offset = find_symbol_offset(libssl_path, "SSL_do_handshake");
+    if (ssl_do_handshake_offset >= 0) {
+        if (verbose)
+            fprintf(stderr, "SSL_do_handshake offset: 0x%lx\n", ssl_do_handshake_offset);
+        opts.retprobe = false;
+        skel->links.ssl_do_handshake_entry = bpf_program__attach_uprobe_opts(
+            skel->progs.ssl_do_handshake_entry, attach_pid, libssl_path,
+            ssl_do_handshake_offset, &opts);
+        if (!skel->links.ssl_do_handshake_entry) {
+            fprintf(stderr, "Warning: failed to attach uprobe to SSL_do_handshake: %s\n",
+                    strerror(errno));
+        } else {
+            if (verbose)
+                fprintf(stderr, "Successfully attached uprobe to SSL_do_handshake\n");
+        }
+    } else {
+        if (verbose)
+            fprintf(stderr, "SSL_do_handshake not found, keylog extraction disabled\n");
+    }
+
     /* Setup output and event reader */
     output_init();
 
@@ -356,6 +383,14 @@ int main(int argc, char **argv)
     if (pcap_path) {
         if (pcap_writer_init(pcap_path) != 0) {
             fprintf(stderr, "Error: failed to initialize PCAP writer\n");
+            goto cleanup;
+        }
+    }
+
+    /* Initialize keylog writer if -k was specified */
+    if (keylog_path) {
+        if (keylog_writer_init(keylog_path) != 0) {
+            fprintf(stderr, "Error: failed to initialize keylog writer\n");
             goto cleanup;
         }
     }
@@ -392,11 +427,13 @@ int main(int argc, char **argv)
     fprintf(stderr, "\ntlscap stopped.\n");
     event_reader_destroy(rb);
     pcap_writer_close();
+    keylog_writer_close();
     tlscap_bpf__destroy(skel);
     return 0;
 
 cleanup:
     pcap_writer_close();
+    keylog_writer_close();
     tlscap_bpf__destroy(skel);
     return 1;
 }

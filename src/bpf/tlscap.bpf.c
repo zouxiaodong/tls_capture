@@ -263,6 +263,117 @@ int ssl_write_ex_return(struct pt_regs *ctx)
     return process_ssl_ex_return(&ssl_write_ex_args, EVENT_SSL_WRITE, ret);
 }
 
+/* Master secret extraction - TLS 1.2 */
+/* These are estimated offsets - actual offsets vary by OpenSSL version */
+/* SSL3_STATE (s3) offset from SSL struct - typically 0x78 or 0x80 */
+#define SSL_S3_OFFSET         0x78
+/* master_key offset in s3 - typically 0x98 or 0x100 */
+#define MASTER_KEY_OFFSET     0x98
+/* client_random offset in s3 - typically 0x10 */
+#define CLIENT_RANDOM_OFFSET  0x10
+/* version offset in s3 - typically 0x8 */
+#define VERSION_OFFSET        0x08
+
+/* TLS constants */
+#define TLS_CLIENT_RANDOM_SIZE 32
+#define TLS_MASTER_SECRET_SIZE 48
+#define EVENT_MASTER_SECRET 2
+
+struct master_secret_event {
+    __u32 pid;
+    __u32 tid;
+    __u64 timestamp_ns;
+    __u32 type;
+    __u32 version;
+    __u32 cipher_id;
+    __u8  client_random[TLS_CLIENT_RANDOM_SIZE];
+    __u8  master_secret[TLS_MASTER_SECRET_SIZE];
+    __u8  is_client;
+    char  comm[16];
+};
+
+/* --- Master secret extraction probes --- */
+
+SEC("uprobe")
+int ssl_do_handshake_entry(struct pt_regs *ctx)
+{
+    if (!check_target_pid())
+        return 0;
+
+    void *ssl = (void *)PT_REGS_PARM1(ctx);
+    if (!ssl)
+        return 0;
+
+    /* Try to extract master secret from SSL structure */
+    /* Navigate: SSL -> s3 -> master_secret / client_random */
+    void *s3 = NULL;
+    if (bpf_probe_read_user(&s3, sizeof(s3), (void *)(ssl + SSL_S3_OFFSET)) != 0)
+        return 0;
+
+    /* Read TLS version from s3 */
+    __u16 version = 0;
+    bpf_probe_read_user(&version, sizeof(version), (void *)(s3 + VERSION_OFFSET));
+
+    /* Only capture TLS 1.2 (0x0303) for now */
+    if (version != 0x0303)
+        return 0;
+
+    /* Read client_random (32 bytes) */
+    __u8 client_random[TLS_CLIENT_RANDOM_SIZE];
+    if (bpf_probe_read_user(&client_random, sizeof(client_random),
+                           (void *)(s3 + CLIENT_RANDOM_OFFSET)) != 0)
+        return 0;
+
+    /* Check if client_random is all zeros (not yet generated) */
+    int has_random = 0;
+    for (int i = 0; i < TLS_CLIENT_RANDOM_SIZE; i++) {
+        if (client_random[i] != 0) {
+            has_random = 1;
+            break;
+        }
+    }
+    if (!has_random)
+        return 0;
+
+    /* Read master_secret (48 bytes) */
+    __u8 master_secret[TLS_MASTER_SECRET_SIZE];
+    if (bpf_probe_read_user(&master_secret, sizeof(master_secret),
+                           (void *)(s3 + MASTER_KEY_OFFSET)) != 0)
+        return 0;
+
+    /* Check if master_secret is all zeros (not yet generated) */
+    int has_secret = 0;
+    for (int i = 0; i < TLS_MASTER_SECRET_SIZE; i++) {
+        if (master_secret[i] != 0) {
+            has_secret = 1;
+            break;
+        }
+    }
+    if (!has_secret)
+        return 0;
+
+    /* Submit master secret event */
+    struct master_secret_event *evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
+    if (!evt)
+        return 0;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    evt->pid = pid_tgid >> 32;
+    evt->tid = (__u32)pid_tgid;
+    evt->timestamp_ns = bpf_ktime_get_ns();
+    evt->type = EVENT_MASTER_SECRET;
+    evt->version = version;
+    evt->cipher_id = 0;
+    evt->is_client = 1;
+    bpf_get_current_comm(evt->comm, sizeof(evt->comm));
+
+    __builtin_memcpy(evt->client_random, client_random, TLS_CLIENT_RANDOM_SIZE);
+    __builtin_memcpy(evt->master_secret, master_secret, TLS_MASTER_SECRET_SIZE);
+
+    bpf_ringbuf_submit(evt, 0);
+    return 0;
+}
+
 /* --- SSL_read_ex probes --- */
 
 SEC("uprobe")
