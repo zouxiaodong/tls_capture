@@ -13,6 +13,7 @@
 #include "ssl_detect.h"
 #include "event_reader.h"
 #include "output.h"
+#include "pcap_writer.h"
 
 static volatile sig_atomic_t running = 1;
 
@@ -134,7 +135,8 @@ static void usage(const char *prog)
         "  -p PID    Capture only from this PID\n"
         "  -l PATH   Path to libssl.so (default: auto-detect)\n"
         "  -b SIZE   Ring buffer size in MB (default: 4)\n"
-        "  -v        Verbose output\n"
+        "  -w FILE   Write output to PCAP file for Wireshark\n"
+"  -v        Verbose output\n"
         "  -h        Show help\n", prog);
 }
 
@@ -142,11 +144,12 @@ int main(int argc, char **argv)
 {
     int target_pid_val = 0;
     const char *libssl_path_arg = NULL;
+    const char *pcap_path = NULL;
     int ringbuf_mb = 4;
     int verbose = 0;
     int opt;
 
-    while ((opt = getopt(argc, argv, "p:l:b:vh")) != -1) {
+    while ((opt = getopt(argc, argv, "p:l:b:w:vh")) != -1) {
         switch (opt) {
         case 'p':
             target_pid_val = atoi(optarg);
@@ -171,6 +174,9 @@ int main(int argc, char **argv)
             break;
         case 'v':
             verbose = 1;
+            break;
+        case 'w':
+            pcap_path = optarg;
             break;
         case 'h':
             usage(argv[0]);
@@ -345,6 +351,15 @@ int main(int argc, char **argv)
 
     /* Setup output and event reader */
     output_init();
+
+    /* Initialize PCAP writer if -w was specified */
+    if (pcap_path) {
+        if (pcap_writer_init(pcap_path) != 0) {
+            fprintf(stderr, "Error: failed to initialize PCAP writer\n");
+            goto cleanup;
+        }
+    }
+
     struct ring_buffer *rb = event_reader_create(
         bpf_map__fd(skel->maps.events));
     if (!rb) {
@@ -376,10 +391,12 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "\ntlscap stopped.\n");
     event_reader_destroy(rb);
+    pcap_writer_close();
     tlscap_bpf__destroy(skel);
     return 0;
 
 cleanup:
+    pcap_writer_close();
     tlscap_bpf__destroy(skel);
     return 1;
 }

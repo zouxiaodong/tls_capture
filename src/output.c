@@ -5,6 +5,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include "output.h"
+#include "pcap_writer.h"
 
 static int64_t mono_to_wall_offset_ns = 0;
 
@@ -94,6 +95,11 @@ void output_event(const struct tls_event *evt)
 
     fprintf(stderr, "[DEBUG] Event received: type=%d data_len=%u\n",
             evt->type, evt->data_len);
+
+    /* Write to PCAP file if enabled */
+    if (pcap_writer_is_enabled()) {
+        pcap_writer_write(evt);
+    }
 
     if (output_is_printable(evt->data, print_len)) {
         fwrite(evt->data, 1, print_len, stdout);
