@@ -368,8 +368,16 @@ int main(int argc, char **argv)
             fprintf(stderr, "Warning: failed to attach uprobe to SSL_do_handshake: %s\n",
                     strerror(errno));
         } else {
-            if (verbose)
-                fprintf(stderr, "Successfully attached uprobe to SSL_do_handshake\n");
+            opts.retprobe = true;
+            skel->links.ssl_do_handshake_return = bpf_program__attach_uprobe_opts(
+                skel->progs.ssl_do_handshake_return, attach_pid, libssl_path,
+                ssl_do_handshake_offset, &opts);
+            if (!skel->links.ssl_do_handshake_return) {
+                fprintf(stderr, "Warning: failed to attach uretprobe to SSL_do_handshake: %s\n",
+                        strerror(errno));
+            } else if (verbose) {
+                fprintf(stderr, "Successfully attached uprobe/uretprobe to SSL_do_handshake\n");
+            }
         }
     } else {
         if (verbose)

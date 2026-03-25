@@ -263,16 +263,18 @@ int ssl_write_ex_return(struct pt_regs *ctx)
     return process_ssl_ex_return(&ssl_write_ex_args, EVENT_SSL_WRITE, ret);
 }
 
-/* Master secret extraction - TLS 1.2 */
-/* These are estimated offsets - actual offsets vary by OpenSSL version */
-/* SSL3_STATE (s3) offset from SSL struct - typically 0x78 or 0x80 */
-#define SSL_S3_OFFSET         0x78
-/* master_key offset in s3 - typically 0x98 or 0x100 */
-#define MASTER_KEY_OFFSET     0x98
-/* client_random offset in s3 - typically 0x10 */
+/* Master secret extraction */
+/* OpenSSL 3.0 structure offsets (statically linked in nginx) */
+/* In OpenSSL 3.0, s3 is directly embedded in SSL, not a pointer */
+#define SSL_S3_OFFSET         0x98
+/* session pointer offset in SSL */
+#define SSL_SESSION_OFFSET    0x40
+/* client_random offset in s3 */
 #define CLIENT_RANDOM_OFFSET  0x10
-/* version offset in s3 - typically 0x8 */
+/* version offset in s3 */
 #define VERSION_OFFSET        0x08
+/* master_key offset in session - OpenSSL 3.0 */
+#define SESSION_MASTER_KEY    0x30
 
 /* TLS constants */
 #define TLS_CLIENT_RANDOM_SIZE 32
@@ -304,27 +306,47 @@ int ssl_do_handshake_entry(struct pt_regs *ctx)
     if (!ssl)
         return 0;
 
-    /* Try to extract master secret from SSL structure */
-    /* Navigate: SSL -> s3 -> master_secret / client_random */
-    void *s3 = NULL;
-    if (bpf_probe_read_user(&s3, sizeof(s3), (void *)(ssl + SSL_S3_OFFSET)) != 0)
+    /* Store SSL pointer for the return probe */
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct ssl_args args = { .buf = (__u64)ssl, .ssl_ptr = (__u64)ssl };
+    bpf_map_update_elem(&ssl_write_args, &pid_tgid, &args, BPF_ANY);
+    return 0;
+}
+
+SEC("uretprobe")
+int ssl_do_handshake_return(struct pt_regs *ctx)
+{
+    if (!check_target_pid())
         return 0;
 
-    /* Read TLS version from s3 */
+    int ret = (int)PT_REGS_RC(ctx);
+    if (ret < 0)
+        return 0;
+
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct ssl_args *args = bpf_map_lookup_elem(&ssl_write_args, &pid_tgid);
+    if (!args)
+        return 0;
+
+    void *ssl = (void *)args->ssl_ptr;
+    bpf_map_delete_elem(&ssl_write_args, &pid_tgid);
+
+    if (!ssl)
+        return 0;
+
+    void *s3 = (void *)(ssl + SSL_S3_OFFSET);
+
     __u16 version = 0;
     bpf_probe_read_user(&version, sizeof(version), (void *)(s3 + VERSION_OFFSET));
 
-    /* Only capture TLS 1.2 (0x0303) for now */
-    if (version != 0x0303)
+    if (version != 0x0303 && version != 0x0304)
         return 0;
 
-    /* Read client_random (32 bytes) */
     __u8 client_random[TLS_CLIENT_RANDOM_SIZE];
     if (bpf_probe_read_user(&client_random, sizeof(client_random),
                            (void *)(s3 + CLIENT_RANDOM_OFFSET)) != 0)
         return 0;
 
-    /* Check if client_random is all zeros (not yet generated) */
     int has_random = 0;
     for (int i = 0; i < TLS_CLIENT_RANDOM_SIZE; i++) {
         if (client_random[i] != 0) {
@@ -335,13 +357,18 @@ int ssl_do_handshake_entry(struct pt_regs *ctx)
     if (!has_random)
         return 0;
 
-    /* Read master_secret (48 bytes) */
-    __u8 master_secret[TLS_MASTER_SECRET_SIZE];
-    if (bpf_probe_read_user(&master_secret, sizeof(master_secret),
-                           (void *)(s3 + MASTER_KEY_OFFSET)) != 0)
+    void *session = NULL;
+    if (bpf_probe_read_user(&session, sizeof(session), (void *)(ssl + SSL_SESSION_OFFSET)) != 0)
         return 0;
 
-    /* Check if master_secret is all zeros (not yet generated) */
+    if (!session)
+        return 0;
+
+    __u8 master_secret[TLS_MASTER_SECRET_SIZE];
+    if (bpf_probe_read_user(&master_secret, sizeof(master_secret),
+                           (void *)(session + SESSION_MASTER_KEY)) != 0)
+        return 0;
+
     int has_secret = 0;
     for (int i = 0; i < TLS_MASTER_SECRET_SIZE; i++) {
         if (master_secret[i] != 0) {
@@ -352,12 +379,10 @@ int ssl_do_handshake_entry(struct pt_regs *ctx)
     if (!has_secret)
         return 0;
 
-    /* Submit master secret event */
     struct master_secret_event *evt = bpf_ringbuf_reserve(&events, sizeof(*evt), 0);
     if (!evt)
         return 0;
 
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
     evt->pid = pid_tgid >> 32;
     evt->tid = (__u32)pid_tgid;
     evt->timestamp_ns = bpf_ktime_get_ns();
